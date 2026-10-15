@@ -1,0 +1,33 @@
+{
+  "name": "fond-uz-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit && node -e \"console.log('TYPECHECK_PASSED')\"",
+    "seed": "tsx src/seed.ts",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.0.1",
+    "@fastify/helmet": "^13.0.1",
+    "@fastify/jwt": "^10.2.4",
+    "@fastify/rate-limit": "^10.3.0",
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "ioredis": "^6.0.0",
+    "pg": "^8.13.3",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
