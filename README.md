@@ -20,6 +20,7 @@ Set the following server environment variables in an ignored `.env` file before 
 | `RATE_LIMIT_REDIS_URL` or `REDIS_URL` | Production | Redis connection string for shared rate limits |
 | `CORS_ORIGINS` | Production | Comma-separated exact site and admin origins |
 | `CLOUDFLARE_ORIGIN_SECRET` | Optional | Shared 32+ character secret that restricts requests to the trusted Cloudflare Worker |
+| `DATABASE_SSL` | Optional | Set to `disable` only for a local PostgreSQL without TLS; otherwise PostgreSQL TLS is enabled |
 | `PORT` | Optional | Listen port; Railway supplies this automatically |
 | `LOG_LEVEL` | Optional | Fastify log level; set `silent` to disable request logs |
 
@@ -36,7 +37,7 @@ npm start
 
 ## Database and initial admin
 
-On startup, the API creates the `app_records` table and indexes if needed. It creates or synchronizes the configured initial admin by email without deleting other users or content. Existing legacy plaintext passwords are migrated to bcrypt hashes. Passwords, hashes, and JWTs are not returned by the admin user endpoint.
+On startup, the API creates the `app_records` table and indexes if needed. When `ADMIN_EMAIL` and a password/hash are configured, it creates or synchronizes that admin by email without deleting other users or content. If the variables are absent but PostgreSQL is configured, existing active admin records can authenticate from their stored bcrypt hash. Without PostgreSQL, both bootstrap values are required. Existing legacy plaintext passwords are migrated to bcrypt hashes. Passwords, hashes, and JWTs are not returned by the admin user endpoint.
 
 For a one-time manual seed, configure `DATABASE_URL`, `ADMIN_EMAIL`, and a strong `ADMIN_PASSWORD` in a private environment and run `npm run seed`. The seed uses bcrypt and leaves public content unchanged. Remove the cleartext seed password afterwards. The normal Railway deployment can perform initial admin setup from the same configured `ADMIN_EMAIL` and `ADMIN_PASSWORD` at API startup.
 
@@ -53,6 +54,6 @@ Payloads are validated with Zod, request bodies are capped at 128 KiB, SQL is pa
 
 ## Railway deployment
 
-This repository is deployed from `main` as the `fond-uz-backend` service in the FondUz production project. Railway builds from the repository root and reads runtime variables from the Railway service. Configure `DATABASE_URL`, `RATE_LIMIT_REDIS_URL`, `CORS_ORIGINS`, `JWT_SECRET`, and either `ADMIN_PASSWORD_HASH` or `ADMIN_PASSWORD` with `ADMIN_EMAIL` using Railway's encrypted service variables. Use Railway service references for Postgres and Redis URLs. The `/health` check verifies database availability. The API is exposed on port `4000` at `https://fond-uz-backend-production.up.railway.app`.
+This repository is deployed from `main` as the `fond-uz-backend` service in the FondUz production project. Railway builds with the repository Dockerfile and supplies `PORT` to the container. The generated domain currently targets port `8080`, matching the running instance; re-check the domain target if Railway changes the runtime port. Configure `DATABASE_URL`, `RATE_LIMIT_REDIS_URL`, `CORS_ORIGINS`, and `JWT_SECRET` as encrypted service variables. Add `ADMIN_EMAIL` and `ADMIN_PASSWORD` (or `ADMIN_PASSWORD_HASH`) to bootstrap or synchronize a named admin; if omitted, login uses existing admin rows in Postgres. Use Railway service references for Postgres and Redis URLs. The `/health` check verifies database availability. The public API is at `https://fond-uz-backend-production.up.railway.app`.
 
 Do not copy production credentials into this repository or a public issue. Verify Railway deployment status and query `GET /health` after each deploy. A Railway `SUCCESS` status checks the service health route; it does not prove that either Next.js client is deployed or that an authenticated admin can sign in. Test those separately in their browser deployments.
