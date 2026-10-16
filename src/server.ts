@@ -22,8 +22,7 @@ if (!adminHash && process.env.ADMIN_PASSWORD) {
   if (Buffer.byteLength(process.env.ADMIN_PASSWORD, "utf8") > 72) throw new Error("ADMIN_PASSWORD must not exceed 72 UTF-8 bytes");
   adminHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, 12);
 }
-if (!adminEmail || !adminHash) throw new Error("Set ADMIN_EMAIL and either ADMIN_PASSWORD_HASH or ADMIN_PASSWORD");
-if (!/^\\$2[aby]\\$(1[0-4])\\$[./A-Za-z0-9]{53}$/.test(adminHash)) throw new Error("ADMIN_PASSWORD_HASH must be a bcrypt hash with cost 10 to 14");
+if (adminHash && !/^\$2[aby]\$(1[0-4])\$[./A-Za-z0-9]{53}$/.test(adminHash)) throw new Error("ADMIN_PASSWORD_HASH must be a bcrypt hash with cost 10 to 14");
 const rateLimitRedisUrl = process.env.RATE_LIMIT_REDIS_URL ?? process.env.REDIS_URL;
 if (production && !rateLimitRedisUrl) throw new Error("RATE_LIMIT_REDIS_URL (or REDIS_URL) is required in production for shared request limits");
 const rateLimitRedis = rateLimitRedisUrl ? new Redis(rateLimitRedisUrl, { connectionName: "fond-uz-api-rate-limits", connectTimeout: 1_000, maxRetriesPerRequest: 1, enableOfflineQueue: false, lazyConnect: true }) : null;
@@ -37,32 +36,36 @@ function isCloudflareProxyRequest(request: { headers: Record<string, string | st
   const candidateBytes = Buffer.from(candidate);
   return expectedBytes.length === candidateBytes.length && timingSafeEqual(expectedBytes, candidateBytes);
 }
-const adminRecord = { id: "local-admin", email: adminEmail, role: "admin", passwordHash: adminHash, active: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+const adminRecord = adminEmail && adminHash ? { id: "local-admin", email: adminEmail, role: "admin", passwordHash: adminHash, active: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : null;
 const fallbackAdminHash = adminHash;
 const allowedOrigins = (process.env.CORS_ORIGINS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 if (production && allowedOrigins.length === 0) throw new Error("CORS_ORIGINS must list the public frontend/admin origins in production");
-const collections = new Map<string, RecordItem[]>([["users", [adminRecord]], ["doctors", []], ["services", []], ["funds", []], ["news", []], ["faqs", []], ["prices", []], ["contacts", []]]);
+const initialNow = new Date().toISOString();
+const collections = new Map<string, RecordItem[]>([["users", adminRecord ? [adminRecord] : []], ["doctors", []], ["services", []], ["funds", []], ["news", []], ["faqs", []], ["prices", []], ["contacts", []]]);
 const pool = process.env.DATABASE_URL ? new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_SSL === "disable" ? undefined : { rejectUnauthorized: false }, max: 10, connectionTimeoutMillis: 5_000, idleTimeoutMillis: 30_000, query_timeout: 10_000, statement_timeout: 5_000 }) : null;
 if (!pool && production) throw new Error("DATABASE_URL is required in production");
+if (!pool && (!adminEmail || !adminHash)) throw new Error("ADMIN_EMAIL and either ADMIN_PASSWORD_HASH or ADMIN_PASSWORD are required when DATABASE_URL is not configured");
 if (pool) {
   await pool.query("CREATE TABLE IF NOT EXISTS app_records (id text PRIMARY KEY, collection text NOT NULL, data jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())");
   await pool.query("CREATE INDEX IF NOT EXISTS app_records_collection_created_idx ON app_records(collection, created_at DESC)");
   await pool.query("CREATE INDEX IF NOT EXISTS app_records_users_email_idx ON app_records (lower(data->>'email')) WHERE collection = 'users'");
-  const existingAdmin = await pool.query("SELECT id, data FROM app_records WHERE collection = 'users' AND lower(data->>'email') = $1 LIMIT 1", [adminEmail]);
-  if (existingAdmin.rows.length) {
-    const { id, data } = existingAdmin.rows[0] as { id: string; data: Record<string, unknown> };
-    await pool.query("UPDATE app_records SET data = $1, updated_at = now() WHERE id = $2", [{ ...data, passwordHash: adminHash, active: true }, id]);
-  } else {
-    await pool.query("INSERT INTO app_records(id, collection, data, created_at, updated_at) VALUES ($1, 'users', $2, now(), now())", [adminRecord.id, adminRecord]);
+  if (adminRecord) {
+    const existingAdmin = await pool.query("SELECT id, data FROM app_records WHERE collection = 'users' AND lower(data->>'email') = $1 LIMIT 1", [adminEmail]);
+    if (existingAdmin.rows.length) {
+      const { id, data } = existingAdmin.rows[0] as { id: string; data: Record<string, unknown> };
+      await pool.query("UPDATE app_records SET data = $1, updated_at = now() WHERE id = $2", [{ ...data, passwordHash: adminHash, active: true }, id]);
+    } else {
+      await pool.query("INSERT INTO app_records(id, collection, data, created_at, updated_at) VALUES ($1, 'users', $2, now(), now())", [adminRecord.id, adminRecord]);
+    }
   }
-  const legacyUsers = await pool.query("SELECT id, data FROM app_records WHERE collection = 'users' AND (data ? 'password' OR data ? 'passwordPlain' OR (data ? 'passwordHash' AND data->>'passwordHash' !~ '^\\\\$2[aby]\\\\$[0-9]{2}\\\\$'))");
+  const legacyUsers = await pool.query("SELECT id, data FROM app_records WHERE collection = 'users' AND (data ? 'password' OR data ? 'passwordPlain' OR (data ? 'passwordHash' AND data->>'passwordHash' !~ '^\\$2[aby]\\$[0-9]{2}\\$'))");
   for (const row of legacyUsers.rows) {
     const data = row.data as Record<string, unknown>;
     const existing = typeof data.passwordHash === "string" ? data.passwordHash : typeof data.password === "string" ? data.password : typeof data.passwordPlain === "string" ? data.passwordPlain : null;
     const next = { ...data };
     delete next.password;
     delete next.passwordPlain;
-    if (existing) next.passwordHash = /^\\$2[aby]\\$\\d{2}\\$/.test(existing) ? existing : await bcrypt.hash(existing, 12);
+    if (existing) next.passwordHash = /^\$2[aby]\$\d{2}\$/.test(existing) ? existing : await bcrypt.hash(existing, 12);
     await pool.query("UPDATE app_records SET data = $1, updated_at = now() WHERE id = $2 AND collection = 'users'", [next, row.id]);
   }
 }
@@ -110,14 +113,17 @@ app.post("/api/auth/login", { config: { rateLimit: { max: 5, timeWindow: "1 minu
   if (Buffer.byteLength(parsed.data.password, "utf8") > 72) return reply.code(400).send({ error: "Invalid request" });
   const userResult = pool ? await pool.query("SELECT data FROM app_records WHERE collection='users' AND lower(data->>'email')=$1 LIMIT 1", [parsed.data.email.toLowerCase()]) : null;
   const storedHash = userResult?.rows[0]?.data?.passwordHash as string | undefined;
-  const validEmail = userResult ? Boolean(userResult.rows[0]) : parsed.data.email.toLowerCase() === adminEmail;
-  const valid = validEmail && userResult?.rows[0]?.data?.active !== false && await bcrypt.compare(parsed.data.password, storedHash ?? fallbackAdminHash);
+  const user = userResult?.rows[0]?.data as Record<string, unknown> | undefined;
+  const validEmail = userResult ? Boolean(user && user.role === "admin" && (!adminEmail || parsed.data.email.toLowerCase() === adminEmail)) : parsed.data.email.toLowerCase() === adminEmail;
+  const candidateHash = typeof user?.passwordHash === "string" ? user.passwordHash : fallbackAdminHash;
+  const valid = validEmail && user?.active !== false && Boolean(candidateHash) && await bcrypt.compare(parsed.data.password, candidateHash!);
   if (!valid) return reply.code(401).send({ error: "Invalid credentials" });
-  const token = app.jwt.sign({ sub: adminEmail, role: "admin" }, { expiresIn: "8h" });
-  reply.setCookie("fond_session", token, { httpOnly: true, secure: production, sameSite: "strict", path: "/", maxAge: 8 * 60 * 60 });
-  return { success: true, user: { email: adminEmail, role: "admin" } };
+  const email = typeof user?.email === "string" ? user.email : adminEmail!;
+  const token = app.jwt.sign({ sub: email, role: "admin" }, { expiresIn: "8h" });
+  reply.setCookie("fond_session", token, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/", maxAge: 8 * 60 * 60 });
+  return { success: true, user: { email, role: "admin" } };
 });
-app.post("/api/auth/logout", async (_request, reply) => { reply.clearCookie("fond_session", { path: "/", httpOnly: true, secure: production, sameSite: "strict" }); return { success: true }; });
+app.post("/api/auth/logout", async (_request, reply) => { reply.clearCookie("fond_session", { path: "/", httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" }); return { success: true }; });
 app.get("/api/auth/session", { preHandler: (app as any).authenticate }, async (request: any) => ({ user: { email: request.user.sub, role: request.user.role } }));
 
 app.get("/api/users/all", { preHandler: (app as any).requireAdmin }, async (request, reply) => {
