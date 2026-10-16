@@ -1,22 +1,58 @@
 # FondUz API
 
-Fastify 5 API for the FondUz site and admin panel. Production storage uses PostgreSQL; shared rate limits use Redis. Passwords are bcrypt hashes. Admin sessions are short lived JWTs in HttpOnly, SameSite cookies.
+Fastify 5 API used by the FondUz website and admin panel. PostgreSQL stores users and content. Redis backs shared rate limits. Node.js 22+ is required.
 
-## Run locally
+## Local development
 
-Use Node.js 22 or newer and PostgreSQL. Install dependencies with `npm ci`, configure the environment, then run `npm run dev`. For production use `npm run build && npm start`.
+```powershell
+npm ci
+npm run dev
+```
 
-Required environment variables: `DATABASE_URL`, `JWT_SECRET` (32+ characters), `ADMIN_EMAIL`, `ADMIN_PASSWORD_HASH` (bcrypt cost 10–14), and `CORS_ORIGINS` (comma-separated exact public frontend and admin origins). Production also requires `RATE_LIMIT_REDIS_URL` or `REDIS_URL`. If the API should only accept traffic from the Cloudflare Worker, set `CLOUDFLARE_ORIGIN_SECRET` to a random value of at least 32 characters and configure the same value as a Worker secret. Never commit secret values.
+Set the following server environment variables in an ignored `.env` file before starting the API:
 
-Run `npm run seed` once with `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `DATABASE_URL` to create or update the initial admin record. The seed hashes the password with bcrypt and does not seed fictitious public content. Remove `ADMIN_PASSWORD` from the environment after seeding. Keep `ADMIN_PASSWORD_HASH` configured for the API's fallback authentication path.
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | Production | PostgreSQL connection string |
+| `JWT_SECRET` | Production | At least 32 characters; Railway can generate this value |
+| `ADMIN_EMAIL` | Yes | Initial admin address, normalized to lowercase |
+| `ADMIN_PASSWORD_HASH` or `ADMIN_PASSWORD` | Yes | bcrypt hash (cost 10–14), or an admin password of up to 72 UTF-8 bytes that is hashed at startup |
+| `RATE_LIMIT_REDIS_URL` or `REDIS_URL` | Production | Redis connection string for shared rate limits |
+| `CORS_ORIGINS` | Production | Comma-separated exact site and admin origins |
+| `CLOUDFLARE_ORIGIN_SECRET` | Optional | Shared 32+ character secret that restricts requests to the trusted Cloudflare Worker |
+| `PORT` | Optional | Listen port; Railway supplies this automatically |
+| `LOG_LEVEL` | Optional | Fastify log level; set `silent` to disable request logs |
 
-## Routes
+When `ADMIN_PASSWORD` is configured instead of `ADMIN_PASSWORD_HASH`, the API creates a bcrypt hash at startup. Production always requires a persistent `JWT_SECRET`; the development server may generate an ephemeral one when none is configured. Never place secrets in client-side variables or commit `.env` files.
 
-- `GET /health`
-- `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/session`
-- `GET /api/users/all` requires an admin session; the response removes password and token fields.
-- Public `GET /api/doctors`, `/services`, `/funds`, `/news`, `/faqs`, and `/prices`
-- Admin-only `POST`, `PATCH`, and `DELETE` for those content collections
-- `POST /api/contacts` accepts validated contact form submissions
+## Build and verify
 
-The API validates inputs, limits request bodies, applies security headers and rate limits, and uses parameterized SQL. User content is rendered as text by the frontend; HTML is not interpreted. Production refuses to start without PostgreSQL, Redis, a strong admin hash, and exact allowed origins.
+```powershell
+npm run verify
+npm start
+```
+
+`npm run verify` runs the TypeScript check, compiles the API, and starts a local security smoke check. The smoke check uses a temporary local admin account and does not connect to production data.
+
+## Database and initial admin
+
+On startup, the API creates the `app_records` table and indexes if needed. It creates or synchronizes the configured initial admin by email without deleting other users or content. Existing legacy plaintext passwords are migrated to bcrypt hashes. Passwords, hashes, and JWTs are not returned by the admin user endpoint.
+
+For a one-time manual seed, configure `DATABASE_URL`, `ADMIN_EMAIL`, and a strong `ADMIN_PASSWORD` in a private environment and run `npm run seed`. The seed uses bcrypt and leaves public content unchanged. Remove the cleartext seed password afterwards. The normal Railway deployment can perform initial admin setup from the same configured `ADMIN_EMAIL` and `ADMIN_PASSWORD` at API startup.
+
+## API routes
+
+- `GET /health` checks the database and returns `503` if PostgreSQL cannot answer.
+- `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/session` manage an eight-hour HttpOnly, SameSite session.
+- `GET /api/users/all` requires an administrator session; password and token fields are filtered from the response.
+- `GET /api/doctors`, `/api/services`, `/api/funds`, `/api/news`, `/api/faqs`, and `/api/prices` return public content.
+- `POST`, `PATCH`, and `DELETE` on content collections require an administrator session.
+- `POST /api/contacts` validates and stores a contact request.
+
+Payloads are validated with Zod, request bodies are capped at 128 KiB, SQL is parameterized, Helmet sets security headers, and login/contact endpoints have dedicated rate limits. Public content responses have a short cache. The API returns user-supplied content as JSON text; the clients must continue rendering it as text rather than interpreting it as HTML.
+
+## Railway deployment
+
+This repository is deployed from `main` as the `fond-uz-backend` service in the FondUz production project. Railway builds from the repository root and reads runtime variables from the Railway service. Configure `DATABASE_URL`, `RATE_LIMIT_REDIS_URL`, `CORS_ORIGINS`, `JWT_SECRET`, and either `ADMIN_PASSWORD_HASH` or `ADMIN_PASSWORD` with `ADMIN_EMAIL` using Railway's encrypted service variables. Use Railway service references for Postgres and Redis URLs. The `/health` check verifies database availability. The API is exposed on port `4000` at `https://fond-uz-backend-production.up.railway.app`.
+
+Do not copy production credentials into this repository or a public issue. Verify Railway deployment status and query `GET /health` after each deploy. A Railway `SUCCESS` status checks the service health route; it does not prove that either Next.js client is deployed or that an authenticated admin can sign in. Test those separately in their browser deployments.
