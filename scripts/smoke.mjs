@@ -24,6 +24,8 @@ try {
   if (!healthy) throw new Error("health endpoint did not become ready");
   const unauth = await fetch(`${base}/api/users/all?limit=1`);
   if (unauth.status !== 401) throw new Error(`unauthenticated /api/users/all returned ${unauth.status}`);
+  const privateContacts = await fetch(`${base}/api/contacts?limit=2`);
+  if (privateContacts.status !== 401) throw new Error(`unauthenticated /api/contacts returned ${privateContacts.status}`);
   const publicNews = await fetch(`${base}/api/news`);
   if (publicNews.status !== 200) throw new Error("public news endpoint failed");
   const login = await fetch(`${base}/api/auth/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: adminEmail, password: adminPassword }) });
@@ -46,11 +48,29 @@ try {
   const listed = await fetch(`${base}/api/news`);
   const serialized = await listed.text();
   if (!serialized.includes(JSON.stringify(payload))) throw new Error("XSS test payload did not round-trip as text data");
-  for (let i = 0; i < 6; i++) {
-    const response = await fetch(`${base}/api/contacts`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": `198.51.100.${i + 1}` }, body: JSON.stringify({ name: "Test User", email: `xss-test-${i}@example.invalid`, phone: "+998900000000", message: "Automated rate limit check" }) });
-    if (i < 5 && response.status !== 201) throw new Error(`contact rate limit blocked request ${i + 1} early`);
-    if (i === 5 && response.status !== 429) throw new Error("contact rate limit was bypassed with spoofed X-Forwarded-For");
+  const contactRequests = [
+    { expectedStatus: 400, body: { name: "Test User", message: "No reply method test" } },
+    { expectedStatus: 201, body: { name: "Phone Only", phone: "+998900000001", message: "Phone contact test", consent: true } },
+    { expectedStatus: 201, body: { name: "Email Only", email: "email-only@example.invalid", message: "Email contact test", consent: false } },
+    { expectedStatus: 201, body: { name: "Legacy Contact", email: "legacy@example.invalid", phone: "+998900000003", message: "Legacy-compatible submission", passwordHash: "smoke-marker" } },
+    { expectedStatus: 201, body: { name: "Full Contact", email: "full@example.invalid", phone: "+998900000004", message: "Contact with explicit consent", consent: true } },
+    { expectedStatus: 429, body: { name: "Rate Limited", email: "limited@example.invalid", phone: "+998900000005", message: "Automated rate limit check" } },
+  ];
+  for (let i = 0; i < contactRequests.length; i++) {
+    const { expectedStatus, body } = contactRequests[i];
+    const response = await fetch(`${base}/api/contacts`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": `198.51.100.${i + 1}` }, body: JSON.stringify(body) });
+    if (response.status !== expectedStatus) throw new Error(`contact request ${i + 1} returned ${response.status}, expected ${expectedStatus}`);
   }
+  const inboxPages = await Promise.all([0, 2].map((offset) => fetch(`${base}/api/contacts?limit=2&offset=${offset}`, { headers: { cookie } })));
+  if (inboxPages.some((response) => response.status !== 200 || !response.headers.get("cache-control")?.includes("no-store"))) throw new Error("admin contact inbox did not require a session or disable caching");
+  const inboxData = await Promise.all(inboxPages.map((response) => response.json()));
+  const contactItems = inboxData.flatMap((page) => page.items);
+  const contactKeys = new Set(["id", "name", "email", "phone", "message", "consent", "createdAt", "updatedAt"]);
+  if (inboxData.some((page) => page.total !== 4 || page.limit !== 2) || contactItems.length !== 4 || new Set(contactItems.map((item) => item.id)).size !== 4) throw new Error("admin contact inbox pagination is incorrect");
+  if (contactItems.some((item) => Object.keys(item).some((key) => !contactKeys.has(key)) || "passwordHash" in item || "token" in item)) throw new Error("admin contact inbox returned fields outside the privacy allowlist");
+  if (!contactItems.some((item) => item.name === "Phone Only" && !item.email && item.phone === "+998900000001" && item.consent === true)) throw new Error("phone-only contact or explicit consent was not persisted");
+  if (!contactItems.some((item) => item.name === "Email Only" && item.email === "email-only@example.invalid" && !item.phone && item.consent === false)) throw new Error("email-only contact or explicit consent choice was not persisted");
+  if (!contactItems.some((item) => item.name === "Legacy Contact" && !("consent" in item))) throw new Error("legacy contact submission without consent remained compatible");
   let olderItem;
   for (let i = 0; i < 101; i++) {
     const title = i === 0 ? payload : `pagination-smoke-${i}`;
@@ -71,7 +91,7 @@ try {
   if (!persisted || persisted.title !== "patched pagination regression" || persisted.createdAt !== olderItem.createdAt) throw new Error("PATCH for the old record did not persist with its original identity and creation date");
   const deleted = await fetch(`${base}/api/news/${encodeURIComponent(olderItem.id)}`, { method: "DELETE", headers: { cookie } });
   if (deleted.status !== 204) throw new Error(`DELETE for a record outside the newest 100 returned ${deleted.status}`);
-  process.stdout.write("BACKEND_SECURITY_SMOKE_PASSED: health, auth, JWT tampering, password redaction, inert XSS JSON, spoof-resistant contact limits, and CRUD beyond 100 with immutable metadata\n");
+  process.stdout.write("BACKEND_SECURITY_SMOKE_PASSED: health, auth, JWT tampering, contact inbox privacy/auth/pagination, optional reply methods, consent persistence, rate limits, inert XSS JSON, and CRUD beyond 100\n");
 } finally {
   child.kill("SIGTERM");
   await new Promise((resolve) => setTimeout(resolve, 300));

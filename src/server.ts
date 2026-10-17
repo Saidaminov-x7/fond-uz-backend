@@ -85,6 +85,7 @@ const contentSchema = z.record(z.string().max(80), z.union([
   z.number().finite(),
   z.boolean(),
 ])).refine((value) => Object.keys(value).length <= 40, "Too many fields");
+const contactFields = new Set(["id", "name", "email", "phone", "message", "consent", "createdAt", "updatedAt"]);
 
 await app.register(helmet, { contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"], formAction: ["'none'"], objectSrc: ["'none'"] } } });
 await app.register(cors, { credentials: true, origin(origin, cb) { if (!origin || allowedOrigins.includes(origin)) cb(null, true); else cb(new Error("Origin not allowed"), false); } });
@@ -139,6 +140,14 @@ app.get("/api/users/all", { preHandler: (app as any).requireAdmin }, async (requ
   const safeUsers = rows.map((user) => Object.fromEntries(Object.entries(user).filter(([key]) => !["passwordHash", "password", "passwordPlain", "token", "resetToken"].includes(key))));
   return reply.header("Cache-Control", "no-store").send({ items: safeUsers, total, limit, offset });
 });
+app.get("/api/contacts", { preHandler: (app as any).requireAdmin }, async (request, reply) => {
+  const limit = Math.min(Math.max(Number((request.query as any)?.limit) || 50, 1), 100);
+  const offset = Math.max(Number((request.query as any)?.offset) || 0, 0);
+  const rows = await getRecords("contacts", limit, offset);
+  const total = pool ? Number((await pool.query("SELECT count(*)::int AS total FROM app_records WHERE collection = 'contacts'")).rows[0]?.total ?? 0) : (collections.get("contacts") ?? []).length;
+  const safeContacts = rows.map((contact) => Object.fromEntries(Object.entries(contact).filter(([key]) => contactFields.has(key))));
+  return reply.header("Cache-Control", "no-store").send({ items: safeContacts, total, limit, offset });
+});
 for (const name of ["doctors", "services", "funds", "news", "faqs", "prices"] as const) {
   app.get(`/api/${name}`, async (request, reply) => {
     const limit = Math.min(Math.max(Number((request.query as any)?.limit) || 50, 1), 100);
@@ -188,9 +197,15 @@ for (const name of ["doctors", "services", "funds", "news", "faqs", "prices"] as
   });
 }
 app.post("/api/contacts", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
-  const schema = z.object({ name: z.string().trim().min(2).max(120), email: z.string().email().max(254), phone: z.string().max(32), message: z.string().trim().min(5).max(3000) });
+  const schema = z.object({
+    name: z.string().trim().min(2).max(120),
+    email: z.string().trim().max(254).refine((value) => value === "" || z.string().email().safeParse(value).success).default(""),
+    phone: z.string().trim().max(32).default(""),
+    message: z.string().trim().min(5).max(3000),
+    consent: z.boolean().optional(),
+  }).refine((contact) => Boolean(contact.email || contact.phone), "At least one reply method is required");
   const parsed = schema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ error: "Invalid contact request" });
-  const now = new Date().toISOString(); const record = { ...parsed.data, id: randomUUID(), createdAt: now, updatedAt: now };
+  const now = new Date().toISOString(); const record = { ...parsed.data, ...(parsed.data.consent === undefined ? {} : { consent: parsed.data.consent }), id: randomUUID(), createdAt: now, updatedAt: now };
   if (pool) await pool.query("INSERT INTO app_records(id, collection, data) VALUES ($1,'contacts',$2)", [record.id, record]); else collections.get("contacts")!.push(record);
   return reply.code(201).send({ success: true });
 });

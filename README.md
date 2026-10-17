@@ -55,13 +55,14 @@ All API payloads and responses are JSON. Collection reads return `{ items, total
 | `POST /api/auth/logout` | Public | Clears the `fond_session` cookie. |
 | `GET /api/auth/session` | Admin session | Returns the authenticated user's email and role. |
 | `GET /api/users/all` | Admin session | Paginated users with the listed password and token fields removed. |
+| `GET /api/contacts` | Admin session | Paginated contact submissions containing visitor PII; no public read route. Only known contact fields are returned, with `Cache-Control: no-store`. |
 | `GET /api/doctors`, `/api/services`, `/api/funds`, `/api/news`, `/api/faqs`, `/api/prices` | Public | Paginated collection records. |
 | `POST /api/doctors`, `/api/services`, `/api/funds`, `/api/news`, `/api/faqs`, `/api/prices` | Admin session | Creates a record and returns `201 { item }`. |
 | `PATCH /api/{collection}/:id` | Admin session | Updates allowed content fields by exact record ID, regardless of pagination position; returns `404` if no matching record is found. `id` and `createdAt` stay server-managed, and `updatedAt` is set by the API. |
 | `DELETE /api/{collection}/:id` | Admin session | Deletes a matching record by exact ID, regardless of pagination position; returns `204`, or `404` if not found. |
-| `POST /api/contacts` | Public, rate limited | Accepts name, email, phone, and message; stores the request and returns `201 { success: true }`. |
+| `POST /api/contacts` | Public, rate limited | Accepts name, message, and at least one reply method (`email` or `phone`); returns `201 { success: true }`. `consent` is an optional boolean for compatibility and is stored when supplied. |
 
-The content body accepts up to 40 fields, with string values up to 8,000 characters, arrays of up to 50 strings (2,000 characters each), finite numbers, and booleans. Contact fields are validated separately. Request bodies are capped at 128 KiB. SQL values are parameterized. The API stores supplied content as JSON; clients must render it as text, not as executable HTML.
+The content body accepts up to 40 fields, with string values up to 8,000 characters, arrays of up to 50 strings (2,000 characters each), finite numbers, and booleans. Contact fields are validated separately: name 2–120 characters, email up to 254 characters when provided, phone up to 32 characters when provided, and message 5–3,000 characters. At least one non-empty email or phone is required. Contact consent, when provided, must be boolean and is stored with the submission. Request bodies are capped at 128 KiB. SQL values are parameterized. The API stores supplied content as JSON; clients must render it as text, not as executable HTML.
 
 The global rate limit is 120 requests per minute per client address; login is limited to 5 per minute and contact submissions to 5 per 15 minutes. In production Redis is mandatory so these limits are shared between instances. The app does not trust arbitrary `X-Forwarded-For`; when a valid Cloudflare origin secret is configured, it uses Cloudflare's connecting IP header only for verified proxy requests.
 
