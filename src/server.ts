@@ -84,7 +84,34 @@ const contentSchema = z.record(z.string().max(80), z.union([
   z.array(z.string().max(2_000)).max(50),
   z.number().finite(),
   z.boolean(),
-])).refine((value) => Object.keys(value).length <= 40, "Too many fields");
+])).refine((value) => Object.keys(value).length <= 40, "Too many fields").superRefine((value, context) => {
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== "string") continue;
+    if ((key === "slug" || key === "professionSlug") && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(raw)) {
+      context.addIssue({ code: "custom", path: [key], message: "Invalid slug" });
+    }
+    if (key === "website") {
+      try {
+        const url = new URL(raw);
+        if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Unsupported protocol");
+      } catch {
+        context.addIssue({ code: "custom", path: [key], message: "Invalid website URL" });
+      }
+    }
+    if (key === "email" && raw && !z.string().email().max(254).safeParse(raw).success) {
+      context.addIssue({ code: "custom", path: [key], message: "Invalid email" });
+    }
+    if (key === "phone" && raw && !/^[+()0-9\s.-]{3,32}$/.test(raw)) {
+      context.addIssue({ code: "custom", path: [key], message: "Invalid phone" });
+    }
+    if (key === "image" && raw) {
+      const localImage = raw.startsWith("/") && !raw.startsWith("//") && !raw.includes("\\");
+      let remoteImage = false;
+      try { remoteImage = new URL(raw).protocol === "https:"; } catch { /* local paths are handled above */ }
+      if (!localImage && !remoteImage) context.addIssue({ code: "custom", path: [key], message: "Invalid image URL" });
+    }
+  }
+});
 const contactFields = new Set(["id", "name", "email", "phone", "message", "consent", "createdAt", "updatedAt"]);
 
 await app.register(helmet, { contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"], formAction: ["'none'"], objectSrc: ["'none'"] } } });

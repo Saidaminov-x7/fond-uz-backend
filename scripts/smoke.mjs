@@ -45,6 +45,10 @@ try {
   const payload = `<img src=x onerror=alert(1)> <script>alert(2)</script>`;
   const created = await fetch(`${base}/api/news`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ slug: "xss-smoke", title: payload, subtitle: "xss test", date: "2026-10-15", content: [payload] }) });
   if (created.status !== 201 || !created.headers.get("content-type")?.includes("application/json")) throw new Error("XSS payload was not handled as JSON data");
+  const unsafeWebsite = await fetch(`${base}/api/funds`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ professionSlug: "security-smoke", name: "Unsafe link", website: "javascript:alert(1)" }) });
+  if (unsafeWebsite.status !== 400) throw new Error("unsafe website protocol was accepted");
+  const unsafeImage = await fetch(`${base}/api/news`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ slug: "unsafe-image", title: "Unsafe image", image: "http://127.0.0.1/private" }) });
+  if (unsafeImage.status !== 400) throw new Error("unsafe image URL was accepted");
   const listed = await fetch(`${base}/api/news`);
   const serialized = await listed.text();
   if (!serialized.includes(JSON.stringify(payload))) throw new Error("XSS test payload did not round-trip as text data");
