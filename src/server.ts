@@ -70,9 +70,14 @@ if (pool) {
   }
 }
 async function getRecords(collection: string, limit = 100, offset = 0): Promise<RecordItem[]> {
-  if (!pool) return (collections.get(collection) ?? []).slice(offset, offset + limit);
+  if (!pool) return [...(collections.get(collection) ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(offset, offset + limit);
   const result = await pool.query("SELECT data FROM app_records WHERE collection = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3", [collection, limit, offset]);
   return result.rows.map((row) => row.data as RecordItem);
+}
+async function getRecord(collection: string, id: string): Promise<RecordItem | null> {
+  if (!pool) return (collections.get(collection) ?? []).find((record) => record.id === id) ?? null;
+  const result = await pool.query("SELECT data FROM app_records WHERE collection = $1 AND id = $2 LIMIT 1", [collection, id]);
+  return (result.rows[0]?.data as RecordItem | undefined) ?? null;
 }
 const contentSchema = z.record(z.string().max(80), z.union([
   z.string().max(8_000),
@@ -150,15 +155,36 @@ for (const name of ["doctors", "services", "funds", "news", "faqs", "prices"] as
   });
   app.patch(`/api/${name}/:id`, { preHandler: (app as any).requireAdmin }, async (request, reply) => {
     const parsed = contentSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ error: "Invalid content" });
-    const rows = await getRecords(name); const idx = rows.findIndex((x) => x.id === (request.params as any).id);
+    const id = (request.params as any).id as string;
+    const existing = await getRecord(name, id);
+    if (!existing) return reply.code(404).send({ error: "Not found" });
+    const patch = Object.fromEntries(Object.entries(parsed.data).filter(([key]) => !["id", "createdAt", "updatedAt"].includes(key)));
+    const item = { ...existing, ...patch, id: existing.id, createdAt: existing.createdAt, updatedAt: new Date().toISOString() };
+    if (pool) {
+      const updated = await pool.query("UPDATE app_records SET data=$1, updated_at=now() WHERE id=$2 AND collection=$3 RETURNING data", [item, id, name]);
+      if (!updated.rowCount) return reply.code(404).send({ error: "Not found" });
+      return { item: updated.rows[0].data as RecordItem };
+    }
+    const rows = collections.get(name) ?? [];
+    const idx = rows.findIndex((record) => record.id === id);
     if (idx < 0) return reply.code(404).send({ error: "Not found" });
-    rows[idx] = { ...rows[idx], ...parsed.data, updatedAt: new Date().toISOString() };
-    if (pool) await pool.query("UPDATE app_records SET data=$1, updated_at=now() WHERE id=$2 AND collection=$3", [rows[idx], rows[idx].id, name]); else collections.set(name, rows); return { item: rows[idx] };
+    rows[idx] = item;
+    collections.set(name, rows);
+    return { item };
   });
   app.delete(`/api/${name}/:id`, { preHandler: (app as any).requireAdmin }, async (request, reply) => {
-    const rows = await getRecords(name); const idx = rows.findIndex((x) => x.id === (request.params as any).id);
+    const id = (request.params as any).id as string;
+    if (pool) {
+      const deleted = await pool.query("DELETE FROM app_records WHERE id=$1 AND collection=$2 RETURNING id", [id, name]);
+      if (!deleted.rowCount) return reply.code(404).send({ error: "Not found" });
+      return reply.code(204).send();
+    }
+    const rows = collections.get(name) ?? [];
+    const idx = rows.findIndex((record) => record.id === id);
     if (idx < 0) return reply.code(404).send({ error: "Not found" });
-    if (pool) await pool.query("DELETE FROM app_records WHERE id=$1 AND collection=$2", [rows[idx].id, name]); else { rows.splice(idx, 1); collections.set(name, rows); } return reply.code(204).send();
+    rows.splice(idx, 1);
+    collections.set(name, rows);
+    return reply.code(204).send();
   });
 }
 app.post("/api/contacts", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
