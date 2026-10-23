@@ -138,7 +138,7 @@ await app.register(helmet, { contentSecurityPolicy: { directives: { defaultSrc: 
 await app.register(cors, { credentials: true, origin(origin, cb) { if (!origin || allowedOrigins.includes(origin)) cb(null, true); else cb(new Error("Origin not allowed"), false); } });
 await app.register(cookie);
 await app.register(jwt, { secret, cookie: { cookieName: "fond_session", signed: false }, sign: { iss: "fond-uz-api", aud: "fond-uz-admin" }, verify: { onlyCookie: true, allowedIss: "fond-uz-api", allowedAud: "fond-uz-admin" } });
-await app.register(rateLimit, { max: 120, timeWindow: "1 minute", ...(rateLimitRedis ? { redis: rateLimitRedis } : {}), keyGenerator: (request) => isCloudflareProxyRequest(request) && typeof request.headers["cf-connecting-ip"] === "string" ? request.headers["cf-connecting-ip"] as string : request.ip });
+await app.register(rateLimit, { max: 120, timeWindow: "1 minute", ...(rateLimitRedis ? { redis: rateLimitRedis } : {}), keyGenerator: (request) => isCloudflareProxyRequest(request) && typeof request.headers["cf-connecting-ip"] === "string" ? request.headers["cf-connecting-ip"] as string : request.ip, errorResponseBuilder: (_request, context) => ({ statusCode: context.statusCode, error: "Too many requests" }) });
 if (cloudflareOriginSecret) {
   app.addHook("onRequest", async (request, reply) => {
     if (request.url !== "/health" && !isCloudflareProxyRequest(request)) return reply.code(403).send({ error: "Forbidden" });
