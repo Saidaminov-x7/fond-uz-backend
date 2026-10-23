@@ -113,6 +113,15 @@ const contentSchema = z.record(z.string().max(80), z.union([
   }
 });
 const contactFields = new Set(["id", "name", "email", "phone", "message", "consent", "createdAt", "updatedAt"]);
+const publicCollections = ["doctors", "services", "funds", "news", "faqs", "prices"] as const;
+const publicCollectionFields: Record<(typeof publicCollections)[number], Set<string>> = {
+  doctors: new Set(["id", "createdAt", "updatedAt", "name", "nameEn", "nameUz", "specialty", "specialtyEn", "specialtyUz", "profession", "bio", "bioEn", "bioUz", "email", "phone", "image"]),
+  services: new Set(["id", "createdAt", "updatedAt", "slug", "name", "nameEn", "nameUz", "description", "descriptionEn", "descriptionUz", "fundsCount", "category", "categoryEn", "categoryUz"]),
+  funds: new Set(["id", "createdAt", "updatedAt", "professionSlug", "name", "nameEn", "nameUz", "phone", "website", "description", "descriptionEn", "descriptionUz"]),
+  news: new Set(["id", "createdAt", "updatedAt", "slug", "title", "titleEn", "titleUz", "subtitle", "subtitleEn", "subtitleUz", "date", "image", "content", "contentEn", "contentUz"]),
+  faqs: new Set(["id", "createdAt", "updatedAt", "question", "questionEn", "questionUz", "answer", "answerEn", "answerUz", "category", "categoryEn", "categoryUz"]),
+  prices: new Set(["id", "createdAt", "updatedAt", "title", "titleEn", "titleUz", "price", "priceEn", "priceUz", "includes", "includesEn", "includesUz"]),
+};
 
 await app.register(helmet, { contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"], formAction: ["'none'"], objectSrc: ["'none'"] } } });
 await app.register(cors, { credentials: true, origin(origin, cb) { if (!origin || allowedOrigins.includes(origin)) cb(null, true); else cb(new Error("Origin not allowed"), false); } });
@@ -175,13 +184,14 @@ app.get("/api/contacts", { preHandler: (app as any).requireAdmin }, async (reque
   const safeContacts = rows.map((contact) => Object.fromEntries(Object.entries(contact).filter(([key]) => contactFields.has(key))));
   return reply.header("Cache-Control", "no-store").send({ items: safeContacts, total, limit, offset });
 });
-for (const name of ["doctors", "services", "funds", "news", "faqs", "prices"] as const) {
+for (const name of publicCollections) {
   app.get(`/api/${name}`, async (request, reply) => {
     const limit = Math.min(Math.max(Number((request.query as any)?.limit) || 50, 1), 100);
     const offset = Math.max(Number((request.query as any)?.offset) || 0, 0);
     const rows = await getRecords(name, limit, offset);
     const total = pool ? Number((await pool.query("SELECT count(*)::int AS total FROM app_records WHERE collection = $1", [name])).rows[0]?.total ?? 0) : (collections.get(name) ?? []).length;
-    return reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=120").send({ items: rows, total, limit, offset });
+    const safeRecords = rows.map((record) => Object.fromEntries(Object.entries(record).filter(([key]) => publicCollectionFields[name].has(key))));
+    return reply.header("Cache-Control", "public, max-age=30, stale-while-revalidate=120").send({ items: safeRecords, total, limit, offset });
   });
   app.post(`/api/${name}`, { preHandler: (app as any).requireAdmin }, async (request, reply) => {
     const parsed = contentSchema.safeParse(request.body);
