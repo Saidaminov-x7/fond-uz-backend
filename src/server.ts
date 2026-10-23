@@ -42,6 +42,17 @@ const allowedOrigins = (process.env.CORS_ORIGINS ?? "").split(",").map((x) => x.
 if (production && allowedOrigins.length === 0) throw new Error("CORS_ORIGINS must list the public frontend/admin origins in production");
 const initialNow = new Date().toISOString();
 const collections = new Map<string, RecordItem[]>([["users", adminRecord ? [adminRecord] : []], ["doctors", []], ["services", []], ["funds", []], ["news", []], ["faqs", []], ["prices", []], ["contacts", []]]);
+const rawInMemoryCollectionLimit = process.env.IN_MEMORY_COLLECTION_LIMIT;
+const inMemoryCollectionLimit = rawInMemoryCollectionLimit === undefined ? 1_000 : Number(rawInMemoryCollectionLimit);
+if (!Number.isSafeInteger(inMemoryCollectionLimit) || inMemoryCollectionLimit < 1 || inMemoryCollectionLimit > 1_000) {
+  throw new Error("IN_MEMORY_COLLECTION_LIMIT must be a positive integer no greater than 1000");
+}
+function appendInMemoryRecord(collection: string, record: RecordItem): boolean {
+  const rows = collections.get(collection);
+  if (!rows || rows.length >= inMemoryCollectionLimit) return false;
+  rows.push(record);
+  return true;
+}
 const pool = process.env.DATABASE_URL ? new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_SSL === "disable" ? undefined : { rejectUnauthorized: false }, max: 10, connectionTimeoutMillis: 5_000, idleTimeoutMillis: 30_000, query_timeout: 10_000, statement_timeout: 5_000 }) : null;
 if (!pool && production) throw new Error("DATABASE_URL is required in production");
 if (!pool && (!adminEmail || !adminHash)) throw new Error("ADMIN_EMAIL and either ADMIN_PASSWORD_HASH or ADMIN_PASSWORD are required when DATABASE_URL is not configured");
@@ -208,7 +219,9 @@ for (const name of publicCollections) {
     const parsed = contentSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "Invalid content" });
     const now = new Date().toISOString(); const item = { ...parsed.data, id: randomUUID(), createdAt: now, updatedAt: now };
-    if (pool) await pool.query("INSERT INTO app_records(id, collection, data) VALUES ($1,$2,$3)", [item.id, name, item]); else collections.get(name)!.push(item); return reply.code(201).send({ item });
+    if (pool) await pool.query("INSERT INTO app_records(id, collection, data) VALUES ($1,$2,$3)", [item.id, name, item]);
+    else if (!appendInMemoryRecord(name, item)) return reply.code(503).send({ error: "Collection capacity reached" });
+    return reply.code(201).send({ item });
   });
   app.patch(`/api/${name}/:id`, { preHandler: (app as any).requireAdmin }, async (request, reply) => {
     const parsed = contentSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ error: "Invalid content" });
@@ -254,7 +267,8 @@ app.post("/api/contacts", { config: { rateLimit: { max: 5, timeWindow: "15 minut
   }).refine((contact) => Boolean(contact.email || contact.phone), "At least one reply method is required");
   const parsed = schema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ error: "Invalid contact request" });
   const now = new Date().toISOString(); const record = { ...parsed.data, ...(parsed.data.consent === undefined ? {} : { consent: parsed.data.consent }), id: randomUUID(), createdAt: now, updatedAt: now };
-  if (pool) await pool.query("INSERT INTO app_records(id, collection, data) VALUES ($1,'contacts',$2)", [record.id, record]); else collections.get("contacts")!.push(record);
+  if (pool) await pool.query("INSERT INTO app_records(id, collection, data) VALUES ($1,'contacts',$2)", [record.id, record]);
+  else if (!appendInMemoryRecord("contacts", record)) return reply.code(503).send({ error: "Collection capacity reached" });
   return reply.code(201).send({ success: true });
 });
 
