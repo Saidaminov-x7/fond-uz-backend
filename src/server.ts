@@ -79,6 +79,13 @@ async function getRecord(collection: string, id: string): Promise<RecordItem | n
   const result = await pool.query("SELECT data FROM app_records WHERE collection = $1 AND id = $2 LIMIT 1", [collection, id]);
   return (result.rows[0]?.data as RecordItem | undefined) ?? null;
 }
+const sensitiveContentKeyFragments = [
+  "password", "passwd", "passphrase", "pwd", "token", "secret", "apikey", "credential",
+  "ssn", "socialsecuritynumber", "passport", "nationalid", "governmentid", "personalid",
+  "patientrecord", "patientdata", "medicalrecord", "healthrecord", "diagnosis",
+  "cookie", "session", "authorization", "privatekey", "cardnumber", "securitycode",
+  "cvv", "bankaccount", "routingnumber",
+];
 const contentSchema = z.record(z.string().max(80), z.union([
   z.string().max(8_000),
   z.array(z.string().max(2_000)).max(50),
@@ -86,6 +93,10 @@ const contentSchema = z.record(z.string().max(80), z.union([
   z.boolean(),
 ])).refine((value) => Object.keys(value).length <= 40, "Too many fields").superRefine((value, context) => {
   for (const [key, raw] of Object.entries(value)) {
+    const normalizedKey = key.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (sensitiveContentKeyFragments.some((fragment) => normalizedKey.includes(fragment))) {
+      context.addIssue({ code: "custom", path: [key], message: "Sensitive field names are not allowed" });
+    }
     if (typeof raw !== "string") continue;
     if ((key === "slug" || key === "professionSlug") && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(raw)) {
       context.addIssue({ code: "custom", path: [key], message: "Invalid slug" });
