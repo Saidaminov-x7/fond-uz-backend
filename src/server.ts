@@ -6,7 +6,7 @@ import rateLimit from "@fastify/rate-limit";
 import jwt from "@fastify/jwt";
 import cookie from "@fastify/cookie";
 import bcrypt from "bcryptjs";
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import pg from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
@@ -144,6 +144,45 @@ const publicCollectionFields: Record<(typeof publicCollections)[number], Set<str
   faqs: new Set(["id", "createdAt", "updatedAt", "question", "questionEn", "questionUz", "answer", "answerEn", "answerUz", "category", "categoryEn", "categoryUz"]),
   prices: new Set(["id", "createdAt", "updatedAt", "title", "titleEn", "titleUz", "price", "priceEn", "priceUz", "includes", "includesEn", "includesUz"]),
 };
+const contactCaptchaTtlSeconds = 5 * 60;
+const contactCaptchaStorePrefix = "fond-uz:contact-captcha:";
+const localContactCaptchas = new Map<string, { answer: string; expiresAt: number }>();
+
+async function createContactCaptcha() {
+  const left = randomInt(2, 10);
+  const right = randomInt(2, 10);
+  const id = randomUUID();
+  const expiresAt = Date.now() + contactCaptchaTtlSeconds * 1000;
+  const answer = String(left + right);
+
+  if (rateLimitRedis) {
+    const stored = await rateLimitRedis.set(`${contactCaptchaStorePrefix}${id}`, answer, "EX", contactCaptchaTtlSeconds, "NX");
+    if (stored !== "OK") throw new Error("Could not store contact CAPTCHA");
+  } else {
+    for (const [captchaId, captcha] of localContactCaptchas) {
+      if (captcha.expiresAt <= Date.now()) localContactCaptchas.delete(captchaId);
+    }
+    // Keep development-only fallback bounded if many local challenges are issued.
+    if (localContactCaptchas.size >= 10_000) {
+      const oldest = localContactCaptchas.keys().next().value;
+      if (oldest) localContactCaptchas.delete(oldest);
+    }
+    localContactCaptchas.set(id, { answer, expiresAt });
+  }
+
+  return { id, question: `${left} + ${right} = ?`, expiresAt: new Date(expiresAt).toISOString() };
+}
+
+async function consumeContactCaptcha(id: string): Promise<string | null> {
+  if (rateLimitRedis) {
+    // GETDEL makes the one-time consume atomic across API instances.
+    const answer = await rateLimitRedis.call("GETDEL", `${contactCaptchaStorePrefix}${id}`);
+    return typeof answer === "string" ? answer : null;
+  }
+  const captcha = localContactCaptchas.get(id);
+  localContactCaptchas.delete(id);
+  return captcha && captcha.expiresAt > Date.now() ? captcha.answer : null;
+}
 
 await app.register(helmet, { contentSecurityPolicy: { directives: { defaultSrc: ["'none'"], baseUri: ["'none'"], frameAncestors: ["'none'"], formAction: ["'none'"], objectSrc: ["'none'"] } } });
 await app.register(cors, { credentials: true, origin(origin, cb) { if (!origin || allowedOrigins.includes(origin)) cb(null, true); else cb(new Error("Origin not allowed"), false); } });
@@ -206,6 +245,10 @@ app.get("/api/contacts", { preHandler: (app as any).requireAdmin }, async (reque
   const safeContacts = rows.map((contact) => Object.fromEntries(Object.entries(contact).filter(([key]) => contactFields.has(key))));
   return reply.header("Cache-Control", "no-store").send({ items: safeContacts, total, limit, offset });
 });
+app.get("/api/contacts/captcha", { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } }, async (_request, reply) => {
+  const challenge = await createContactCaptcha();
+  return reply.header("Cache-Control", "no-store").send(challenge);
+});
 for (const name of publicCollections) {
   app.get(`/api/${name}`, async (request, reply) => {
     const limit = Math.min(Math.max(Number((request.query as any)?.limit) || 50, 1), 100);
@@ -258,6 +301,21 @@ for (const name of publicCollections) {
   });
 }
 app.post("/api/contacts", { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } }, async (request, reply) => {
+  const captchaSubmission = z.object({
+    captchaId: z.string().uuid(),
+    captchaAnswer: z.union([
+      z.string().trim().regex(/^\d{1,2}$/),
+      z.number().int().min(0).max(99).transform(String),
+    ]),
+  }).safeParse(request.body);
+  if (!captchaSubmission.success) return reply.code(400).send({ error: "CAPTCHA_INVALID" });
+  const expectedAnswer = await consumeContactCaptcha(captchaSubmission.data.captchaId);
+  const submittedAnswer = String(captchaSubmission.data.captchaAnswer).trim();
+  const expectedBytes = expectedAnswer === null ? Buffer.alloc(0) : Buffer.from(expectedAnswer);
+  const submittedBytes = Buffer.from(submittedAnswer);
+  const validCaptcha = expectedBytes.length > 0 && expectedBytes.length === submittedBytes.length && timingSafeEqual(expectedBytes, submittedBytes);
+  if (!validCaptcha) return reply.code(400).send({ error: "CAPTCHA_INVALID" });
+
   const schema = z.object({
     name: z.string().trim().min(2).max(120),
     email: z.string().trim().max(254).refine((value) => value === "" || z.string().email().safeParse(value).success).default(""),
